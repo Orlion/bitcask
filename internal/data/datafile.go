@@ -23,6 +23,7 @@ type Datafile interface {
 	Sync() error // 刷盘
 	Size() int64
 	Read() (internal.Entry, int64, error)
+	ReadAt(index, size int64) (internal.Entry, error)
 	Write(entry internal.Entry) (int64, int64, error)
 }
 
@@ -123,10 +124,18 @@ func (df *datafile) Size() int64 {
 	return df.offset
 }
 
-func (df *datafile) Read() (internal.Entry, int64, error) {
-	return nil, 0, nil
+//
+func (df *datafile) Read() (e internal.Entry, n int64, err error) {
+	df.Lock()
+	defer df.Unlock()
+	n, err = df.dec.Decode(&e)
+	return
 }
 
 func (df *datafile) Write(entry internal.Entry) (int64, int64, error) {
+
+}
+
+func (df *datafile) ReadAt(index, size int64) (internal.Entry, error) {
 
 }
