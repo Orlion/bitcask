@@ -2,10 +2,11 @@ package codec
 
 import (
 	"encoding/binary"
-	"errors"
 	"github.com/Orlion/bitcask/internal"
 	"io"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 var (
@@ -76,4 +77,15 @@ func getKeyValueSizes(buf []byte, maxKeySize uint32, maxValueSize uint64) (uint3
 	}
 
 	return actualKeySize, actualValueSize, nil
+}
+
+func DecodeEntry(b []byte, e *internal.Entry, maxKeySize uint32, maxValueSize uint64) error {
+	valueOffset, _, err := getKeyValueSizes(b, maxKeySize, maxValueSize)
+	if err != nil {
+		return errors.Wrap(err, "key/value size are invalid")
+	}
+
+	decodeWithoutPrefix(b[keySize+valueSize:], valueOffset, e)
+
+	return nil
 }

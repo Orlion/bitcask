@@ -16,6 +16,11 @@ const (
 	defaultDatafileFilename = "%09d.data"
 )
 
+var (
+	errReadError = errors.New("error: read error")
+	errReadonly  = errors.New("error: read only datafile")
+)
+
 type Datafile interface {
 	FileId() int
 	Name() string
@@ -124,7 +129,7 @@ func (df *datafile) Size() int64 {
 	return df.offset
 }
 
-//
+// 从datafile中读取下一个entry
 func (df *datafile) Read() (e internal.Entry, n int64, err error) {
 	df.Lock()
 	defer df.Unlock()
@@ -132,10 +137,39 @@ func (df *datafile) Read() (e internal.Entry, n int64, err error) {
 	return
 }
 
-func (df *datafile) Write(entry internal.Entry) (int64, int64, error) {
+func (df *datafile) Write(e internal.Entry) (int64, int64, error) {
+	if df.w == nil {
+		return -1, 0, errReadonly
+	}
 
+	df.Lock()
+	defer df.Unlock()
+
+	e.Offset = df.offset
+
+	return e.Offset, 0, nil
 }
 
-func (df *datafile) ReadAt(index, size int64) (internal.Entry, error) {
+func (df *datafile) ReadAt(index, size int64) (e internal.Entry, err error) {
+	var n int
 
+	b := make([]byte, size)
+
+	if df.w == nil {
+		n, err = df.ra.ReadAt(b, index)
+	} else {
+		n, err = df.w.ReadAt(b, index)
+	}
+	if err != nil {
+		return
+	}
+
+	if int64(n) != size {
+		err = errReadError
+		return
+	}
+
+	codec.DecodeEntry(b, &e, df.maxKeySize, df.maxValueSize)
+
+	return
 }
