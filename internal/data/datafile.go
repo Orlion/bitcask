@@ -45,6 +45,7 @@ type datafile struct {
 	maxValueSize uint64
 }
 
+// 创建datafile
 func NewDatafile(path string, id int, readonly bool, maxKeySize uint32, maxValueSize uint64, fileMode os.FileMode) (Datafile, error) {
 	var (
 		r   *os.File
@@ -56,6 +57,7 @@ func NewDatafile(path string, id int, readonly bool, maxKeySize uint32, maxValue
 	fn := filepath.Join(path, fmt.Sprintf(defaultDatafileFilename, id))
 
 	if !readonly {
+		// 如果是可写的还要创建一个Writer
 		w, err = os.OpenFile(fn, os.O_WRONLY|os.O_APPEND|os.O_CREATE, fileMode)
 		if err != nil {
 			return nil, err
@@ -83,9 +85,15 @@ func NewDatafile(path string, id int, readonly bool, maxKeySize uint32, maxValue
 	enc := codec.NewEncoder(w)
 
 	return &datafile{
-		id: id,
-		r:  r,
-		ra: ra,
+		id:           id,
+		r:            r,
+		ra:           ra,
+		w:            w,
+		offset:       offset,
+		dec:          dec,
+		enc:          enc,
+		maxKeySize:   maxKeySize,
+		maxValueSize: maxValueSize,
 	}, nil
 }
 
@@ -120,6 +128,7 @@ func (df *datafile) Sync() error {
 		return nil
 	}
 
+	// 刷盘
 	return df.w.Sync()
 }
 
@@ -137,6 +146,7 @@ func (df *datafile) Read() (e internal.Entry, n int64, err error) {
 	return
 }
 
+// 向datafile写入数据，返回旧offset即该条数据的起始地址、写入的数据长度、错误
 func (df *datafile) Write(e internal.Entry) (int64, int64, error) {
 	if df.w == nil {
 		return -1, 0, errReadonly
@@ -147,7 +157,14 @@ func (df *datafile) Write(e internal.Entry) (int64, int64, error) {
 
 	e.Offset = df.offset
 
-	return e.Offset, 0, nil
+	n, err := df.enc.Encode(e)
+	if err != nil {
+		return -1, 0, err
+	}
+	// 移动offset
+	df.offset += n
+
+	return e.Offset, n, nil
 }
 
 func (df *datafile) ReadAt(index, size int64) (e internal.Entry, err error) {
