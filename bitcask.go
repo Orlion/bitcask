@@ -7,9 +7,11 @@ import (
 	"github.com/Orlion/bitcask/internal/index"
 	"github.com/Orlion/bitcask/internal/metadata"
 	art "github.com/plar/go-adaptive-radix-tree"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const (
@@ -156,12 +158,68 @@ func (b *Bitcask) saveIndexes() error {
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	e, err := b.get(key)
+	if err != nil {
+		return nil, err
+	}
+	return e.Value, nil
 }
 
 func (b *Bitcask) get(key []byte) (internal.Entry, error) {
 	// 先从内存的索引树中查找索引
 	value, found := b.trie.Search(key)
 	if !found {
-		return internal.Entry{},
+		return internal.Entry{}, ErrKeyNotFound
 	}
+
+	if b.isExpired(key) {
+		return internal.Entry{}, ErrKeyExpired
+	}
+
+	item := value.(internal.Item)
+	var df data.Datafile
+	if item.FileId == b.curr.FileId() {
+		df = b.curr
+	} else {
+		df = b.datafiles[item.FileId]
+	}
+	// 根据索引到文件中获取数据
+	e, err := df.ReadAt(item.Offset, item.Size)
+	if err != nil {
+		return internal.Entry{}, err
+	}
+
+	// 校验和检查
+	checksum := crc32.ChecksumIEEE(e.Value)
+	if checksum != e.Checksum {
+		return internal.Entry{}, ErrChecksumFailed
+	}
+
+	return e, nil
+}
+
+func (b *Bitcask) isExpired(key []byte) bool {
+	expiry, found := b.ttlIndex.Search(key)
+	if !found {
+		return false
+	}
+	return expiry.(time.Time).Before(time.Now().UTC())
+}
+
+func (b *Bitcask) Delete(key []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+}
+
+func (b *Bitcask) delete(key []byte) error {
+	_, _, err := b.put(key, []byte{})
+	if err != nil {
+		return err
+	}
+	if item, found := b.trie.Search(key); found {
+		b.metadata.ReclaimableSpace += item.(internal.Item).Size
+	}
+	b.trie.Delete(key)
+
 }
