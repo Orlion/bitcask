@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/Orlion/bitcask/internal"
 	"github.com/Orlion/bitcask/internal/data"
+	"github.com/Orlion/bitcask/internal/data/codec"
 	"github.com/Orlion/bitcask/internal/index"
 	"github.com/Orlion/bitcask/internal/metadata"
 	art "github.com/plar/go-adaptive-radix-tree"
@@ -206,10 +207,10 @@ func (b *Bitcask) isExpired(key []byte) bool {
 	return expiry.(time.Time).Before(time.Now().UTC())
 }
 
-func (b *Bitcask) Delete(key []byte) {
+func (b *Bitcask) Delete(key []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
+	return b.delete(key)
 }
 
 func (b *Bitcask) delete(key []byte) error {
@@ -218,8 +219,14 @@ func (b *Bitcask) delete(key []byte) error {
 		return err
 	}
 	if item, found := b.trie.Search(key); found {
-		b.metadata.ReclaimableSpace += item.(internal.Item).Size
+		b.metadata.ReclaimableSpace += item.(internal.Item).Size + codec.MetaInfoSize + int64(len(key))
 	}
 	b.trie.Delete(key)
+	b.ttlIndex.Delete(key)
+	return nil
+}
+
+// 删除所有过期的key
+func (b *Bitcask) RunGC() error {
 
 }

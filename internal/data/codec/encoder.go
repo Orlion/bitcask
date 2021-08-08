@@ -13,6 +13,7 @@ const (
 	valueSize    = 8
 	checksumSize = 4
 	ttlSize      = 8
+	MetaInfoSize = keySize + valueSize + checksumSize + ttlSize
 )
 
 type Encoder struct {
