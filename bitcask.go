@@ -3,14 +3,17 @@ package bitcask
 import (
 	"fmt"
 	"github.com/Orlion/bitcask/internal"
+	"github.com/Orlion/bitcask/internal/config"
 	"github.com/Orlion/bitcask/internal/data"
 	"github.com/Orlion/bitcask/internal/data/codec"
 	"github.com/Orlion/bitcask/internal/index"
 	"github.com/Orlion/bitcask/internal/metadata"
 	art "github.com/plar/go-adaptive-radix-tree"
 	"hash/crc32"
+	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -21,7 +24,7 @@ const (
 
 type Bitcask struct {
 	mu         sync.RWMutex
-	config     *Config
+	config     *config.Config
 	curr       data.Datafile
 	path       string
 	datafiles  map[int]data.Datafile
@@ -30,6 +33,7 @@ type Bitcask struct {
 	indexer    index.Indexer
 	ttlIndex   art.Tree
 	ttlIndexer index.Indexer
+	isMerging  bool
 }
 
 func New() *Bitcask {
@@ -228,5 +232,109 @@ func (b *Bitcask) delete(key []byte) error {
 
 // 删除所有过期的key
 func (b *Bitcask) RunGC() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.runGC()
+}
+
+func (b *Bitcask) runGC() error {
+	keysToDelete := art.New()
+
+	// 遍历所有带过期时间的key，收集
+	// TODO: 为什么先收集完之后再删除，为什么不在遍历过程中直接删除？
+	b.ttlIndex.ForEach(func(node art.Node) (cont bool) {
+		if !b.isExpired(node.Key()) {
+			return true
+		}
+		keysToDelete.Insert(node.Key(), true)
+		return true
+	})
+
+	keysToDelete.ForEach(func(node art.Node) (cont bool) {
+		b.delete(node.Key())
+		return true
+	})
+
+	return nil
+}
+
+// 合并所有datafile，将旧key和已被删除的key删除
+func (b *Bitcask) Merge() error {
+	b.mu.Lock()
+	if b.isMerging {
+		b.mu.Unlock()
+		return ErrMergeInProgress
+	}
+
+	b.isMerging = true
+	b.mu.Unlock()
+	defer func() {
+		b.isMerging = false
+	}()
+
+	b.mu.RLock()
+	// 关闭当前文件
+	err := b.closeCurrentFile()
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	filesToMerge := make([]int, 0, len(b.datafiles))
+	for k := range b.datafiles {
+		filesToMerge = append(filesToMerge, k)
+	}
+	err := b.openNewWritableFile()
+	if err != nil {
+		b.mu.RUnlock()
+		return err
+	}
+	b.mu.RUnlock()
+
+	sort.Ints(filesToMerge)
+	// 创建合并用的临时文件夹
+	temp, err := ioutil.TempDir(b.path, "merge")
+	if err != nil {
+		return err
+	}
+	// 合并结束后删除临时文件夹及所有内容
+	defer os.RemoveAll(temp)
+
+	mdb, err := Open(temp, withConfig(b.config))
+}
+
+func (b *Bitcask) closeCurrentFile() error {
+	if err := b.curr.Close(); err != nil {
+		return err
+	}
+
+	id := b.curr.FileId()
+	df, err := data.NewDatafile(b.path, id, true, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+
+	b.datafiles[id] = df
+
+	return nil
+}
+
+func (b *Bitcask) openNewWritableFile() error {
+	id := b.curr.FileId() + 1
+	curr, err := data.NewDatafile(b.path, id, false, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+	b.curr = curr
+	return nil
+}
+
+func Open(path string, options ...Option) (*Bitcask, error) {
+	var (
+		cfg  *config.Config
+		err  error
+		meta *metadata.MetaData
+	)
+
+	configPath := filepath.Join(path, "config.json")
 
 }
