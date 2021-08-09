@@ -10,4 +10,5 @@ var (
 	ErrKeyExpired      = errors.New("error: key expired")
 	ErrChecksumFailed  = errors.New("error: checksum failed")
 	ErrMergeInProgress = errors.New("error: merge in progress")
+	ErrDatabaseLocked  = errors.New("error: database locked")
 )

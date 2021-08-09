@@ -22,3 +22,8 @@ func LoadFromFile(path string, v interface{}) error {
 
 	return json.Unmarshal(content, v)
 }
+
+func Exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}

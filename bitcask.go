@@ -8,6 +8,7 @@ import (
 	"github.com/Orlion/bitcask/internal/data/codec"
 	"github.com/Orlion/bitcask/internal/index"
 	"github.com/Orlion/bitcask/internal/metadata"
+	"github.com/gofrs/flock"
 	art "github.com/plar/go-adaptive-radix-tree"
 	"hash/crc32"
 	"io/ioutil"
@@ -15,16 +16,20 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const (
 	ttlIndexFile = "ttl_index"
+	lockfile     = "lock"
 )
 
 type Bitcask struct {
 	mu         sync.RWMutex
+	flock      *flock.Flock
 	config     *config.Config
+	options    []Option
 	curr       data.Datafile
 	path       string
 	datafiles  map[int]data.Datafile
@@ -335,6 +340,68 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		meta *metadata.MetaData
 	)
 
+	// 加载配置文件
 	configPath := filepath.Join(path, "config.json")
+	if internal.Exists(configPath) {
+		cfg, err := config.Load(path)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg = newDefaultConfig()
+	}
 
+	// 这里忽略掉版本升级的代码
+
+	//
+	for _, opt := range options {
+		if err := opt(cfg); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := os.MkdirAll(path, cfg.DirFileModeBeforeUmask); err != nil {
+		return nil, err
+	}
+
+	meta, err = loadMetadata(path)
+	if err != nil {
+		return nil, err
+	}
+
+	bitcask := &Bitcask{
+		flock:      flock.New(filepath.Join(path, lockfile)),
+		config:     cfg,
+		options:    options,
+		path:       path,
+		indexer:    index.NewIndexer(),
+		ttlIndexer: index.NewTTLIndexer(),
+		metadata:   meta,
+	}
+
+	ok, err := bitcask.flock.TryLock()
+	if err != nil {
+		return nil, err
+	}
+
+	if !ok {
+		return nil, ErrDatabaseLocked
+	}
+
+	// 将配置保存到配置文件
+	if err := cfg.Save(configPath); err != nil {
+		return nil, err
+	}
+
+	if cfg.AutoRecovery {
+
+	}
+}
+
+func loadMetadata(path string) (*metadata.MetaData, error) {
+	if !internal.Exists(filepath.Join(path, "meta.json")) {
+		meta := new(metadata.MetaData)
+		return meta, nil
+	}
+	return metadata.Load(filepath.Join(path, "meta.json"))
 }
