@@ -2,9 +2,10 @@ package codec
 
 import (
 	"encoding/binary"
-	"github.com/Orlion/bitcask/internal"
 	"io"
 	"time"
+
+	"github.com/Orlion/bitcask/internal"
 
 	"github.com/pkg/errors"
 )
@@ -12,6 +13,7 @@ import (
 var (
 	errCantDecodeOnNilEntry  = errors.New("can't decode on nil entry")
 	errInvalidKeyOrValueSize = errors.New("key/value size is invalid")
+	errTruncatedData         = errors.New("data is truncated")
 )
 
 type Decoder struct {
@@ -88,4 +90,13 @@ func DecodeEntry(b []byte, e *internal.Entry, maxKeySize uint32, maxValueSize ui
 	decodeWithoutPrefix(b[keySize+valueSize:], valueOffset, e)
 
 	return nil
+}
+
+func IsCorruptedData(err error) bool {
+	switch err {
+	case errCantDecodeOnNilEntry, errInvalidKeyOrValueSize, errTruncatedData:
+		return true
+	default:
+		return false
+	}
 }

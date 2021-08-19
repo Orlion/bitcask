@@ -2,8 +2,11 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
+	"sort"
 )
 
 func SaveJson2File(v interface{}, path string, mode os.FileMode) error {
@@ -26,4 +29,14 @@ func LoadFromFile(path string, v interface{}) error {
 func Exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// 获取path文件夹下所有data文件
+func GetDatafiles(path string) ([]string, error) {
+	fns, err := filepath.Glob(fmt.Sprintf("%s/*.data", path))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(fns)
+	return fns, nil
 }

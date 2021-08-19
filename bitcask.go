@@ -2,6 +2,14 @@ package bitcask
 
 import (
 	"fmt"
+	"hash/crc32"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/Orlion/bitcask/internal"
 	"github.com/Orlion/bitcask/internal/config"
 	"github.com/Orlion/bitcask/internal/data"
@@ -10,14 +18,6 @@ import (
 	"github.com/Orlion/bitcask/internal/metadata"
 	"github.com/gofrs/flock"
 	art "github.com/plar/go-adaptive-radix-tree"
-	"hash/crc32"
-	"io/ioutil"
-	"os"
-	"path/filepath"
-	"sort"
-	"sync"
-	"syscall"
-	"time"
 )
 
 const (
@@ -288,7 +288,7 @@ func (b *Bitcask) Merge() error {
 	for k := range b.datafiles {
 		filesToMerge = append(filesToMerge, k)
 	}
-	err := b.openNewWritableFile()
+	err = b.openNewWritableFile()
 	if err != nil {
 		b.mu.RUnlock()
 		return err
