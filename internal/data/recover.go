@@ -22,10 +22,26 @@ func CheckAndRecover(path string, cfg *config.Config) error {
 	}
 
 	f := dfs[len(dfs)-1]
+	// 检查并回复最后一个datafile
+	recovered, err := recoverDatafile(f, cfg)
+	if err != nil {
+		return err
+	}
 
+	if recovered {
+		if err := os.Remove(filepath.Join(path, "index")); err != nil {
+			return fmt.Errorf("error deleting the index on recovery: %s", err) // TODO: %s是不是应该写成%w
+		}
+	}
+
+	return nil
 }
 
 // 恢复datafile
+// 1. 创建一个用于恢复的临时文件
+// 2. 从原文件中挨个导入到临时文件中
+// 3. 如果遇到损坏的数据就跳过继续迁移，直到全部导完
+// 4. 如果没有损坏的数据则删除临时文件，如果有则rename临时文件为原文件替换掉原文件
 func recoverDatafile(path string, cfg *config.Config) (recovered bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -64,9 +80,11 @@ func recoverDatafile(path string, cfg *config.Config) (recovered bool, err error
 		// 从原文件中读出去迁移到恢复文件中
 		_, err = dec.Decode(&e)
 		if err == io.EOF {
+			// 读到文件尾结束
 			break
 		}
 
+		// 检查是否遇到了损坏数据
 		if codec.IsCorruptedData(err) {
 			corrupted = true
 			continue
@@ -76,6 +94,7 @@ func recoverDatafile(path string, cfg *config.Config) (recovered bool, err error
 			return false, fmt.Errorf("unexpected error while reading datafile: %w", err)
 		}
 
+		// 写到用于恢复的临时文件中
 		if _, err := enc.Encode(e); err != nil {
 			return false, fmt.Errorf("writing to recovered datafile: %w", err)
 		}

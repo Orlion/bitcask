@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 func SaveJson2File(v interface{}, path string, mode os.FileMode) error {
@@ -39,4 +41,30 @@ func GetDatafiles(path string) ([]string, error) {
 	}
 	sort.Strings(fns)
 	return fns, nil
+}
+
+// 将文件中的id解析出来
+func ParseIds(fns []string) ([]int, error) {
+	var ids []int
+	for _, fn := range fns {
+		// fn: /xxx/xxx/123.data
+		// after Base
+		// fn: 123.data
+		fn = filepath.Base(fn)
+		// ext:.data
+		ext := filepath.Ext(fn)
+		if ext != ".data" {
+			continue
+		}
+
+		id, err := strconv.ParseInt(strings.TrimSuffix(fn, ext), 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		ids = append(ids, int(id))
+	}
+
+	sort.Ints(ids)
+	return ids, nil
 }

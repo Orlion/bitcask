@@ -1,8 +1,9 @@
 package index
 
 import (
-	art "github.com/plar/go-adaptive-radix-tree"
 	"os"
+
+	art "github.com/plar/go-adaptive-radix-tree"
 )
 
 type Indexer interface {
@@ -18,6 +19,7 @@ type indexer struct{}
 
 // 从磁盘文件中加载出索引树
 func (i *indexer) Load(path string, maxKeySize uint32) (art.Tree, bool, error) {
+	// TODO
 	return nil, false, nil
 }
 

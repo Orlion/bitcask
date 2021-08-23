@@ -3,8 +3,10 @@ package bitcask
 import (
 	"fmt"
 	"hash/crc32"
+	"io"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -27,7 +29,7 @@ const (
 
 type Bitcask struct {
 	mu         sync.RWMutex
-	flock      *flock.Flock
+	flock      *flock.Flock // 通过文件对工作目录上锁
 	config     *config.Config
 	options    []Option
 	curr       data.Datafile
@@ -99,6 +101,7 @@ func (b *Bitcask) put(key, value []byte) (int64, int64, error) {
 }
 
 // 根据当前占用空间，切分新data文件出来
+// 如果创建了新data文件则持久化当前索引到磁盘
 func (b *Bitcask) maybeRotate() error {
 	size := b.curr.Size()
 	if size < int64(b.config.MaxDatafileSize) {
@@ -138,7 +141,7 @@ func (b *Bitcask) maybeRotate() error {
 	b.curr = curr
 
 	// 将当前索引保存到磁盘文件中
-	// TODO: 为何此时保存索引文件？
+	// 在创建新文件时将索引持久化到磁盘
 	err = b.saveIndexes()
 	if err != nil {
 		return err
@@ -304,7 +307,142 @@ func (b *Bitcask) Merge() error {
 	// 合并结束后删除临时文件夹及所有内容
 	defer os.RemoveAll(temp)
 
+	// 在临时目录中创建一个merge用的db实例
 	mdb, err := Open(temp, withConfig(b.config))
+
+	// 遍历所有的键值对写到新db实例中
+	err = b.Fold(func(key []byte) error {
+		item, _ := b.trie.Search(key)
+		if item.(internal.Item).FileId > filesToMerge[len(filesToMerge)-1] {
+			// 如果key所在的文件id大于要merge的最后一个文件id则该key不需要参与merge(该文件中所有key不需要参与merge)
+			return nil
+		}
+
+		e, err := b.get(key)
+		if err != nil {
+			return err
+		}
+
+		if e.Expiry != nil {
+			// TODO: PutWithTTL
+		} else {
+			if err := mdb.Put(key, e.Value); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// 关闭临时实例
+	if err = mdb.Close(); err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 关闭当前实例
+	if err = b.close(); err != nil {
+		return err
+	}
+
+	// 删除所有的datafile
+	files, err := ioutil.ReadDir(b.path)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if file.IsDir() || file.Name() == lockfile {
+			continue
+		}
+
+		ids, err := internal.ParseIds([]string{file.Name()})
+		if err != nil {
+			return err
+		}
+
+		if len(ids) > 0 && ids[0] > filesToMerge[len(filesToMerge)-1] {
+			continue
+		}
+
+		err = os.RemoveAll(path.Join(b.path, file.Name()))
+		if err != nil {
+			return err
+		}
+	}
+
+	// 遍历临时工作目录下的所有文件通过rename挪到当前实例的工作目录中
+	files, err = ioutil.ReadDir(mdb.path)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if file.Name() == lockfile {
+			continue
+		}
+
+		err := os.Rename(path.Join(mdb.path, file.Name()), path.Join(b.path, file.Name()))
+		if err != nil {
+			return err
+		}
+	}
+
+	b.metadata.ReclaimableSpace = 0
+
+	// 重新打开实例
+	return b.reopen()
+}
+
+func (b *Bitcask) Fold(f func(key []byte) error) (err error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	b.trie.ForEach(func(node art.Node) bool {
+		if err = f(node.Key()); err != nil {
+			return false
+		}
+
+		return true
+	})
+
+	return
+}
+
+func (b *Bitcask) Close() error {
+	b.mu.RLock()
+	defer func() {
+		b.mu.RUnlock()
+		b.flock.Unlock()
+	}()
+
+	return b.close()
+}
+
+func (b *Bitcask) close() error {
+	if err := b.saveIndexes(); err != nil {
+		return err
+	}
+
+	b.metadata.IndexUpToDate = true
+	if err := b.saveMetaData(); err != nil {
+		return err
+	}
+
+	for _, df := range b.datafiles {
+		if err := df.Close(); err != nil {
+			return err
+		}
+	}
+
+	return b.curr.Close()
+}
+
+func (b *Bitcask) saveMetaData() error {
+	return b.metadata.Save(filepath.Join(b.path, "meta.json"), b.config.DirFileModeBeforeUmask)
 }
 
 func (b *Bitcask) closeCurrentFile() error {
@@ -333,6 +471,40 @@ func (b *Bitcask) openNewWritableFile() error {
 	return nil
 }
 
+func (b *Bitcask) Reopen() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.reopen()
+}
+
+func (b *Bitcask) reopen() error {
+	// 从工作目录中加载出datafiles
+	datafiles, lastId, err := loadDatafiles(b.path, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return err
+	}
+
+	// 从工作目录出加载出索引
+	t, ttlIndex, err := loadIndexes(b, datafiles, lastId)
+	if err != nil {
+		return err
+	}
+
+	// 创建当前可读写文件
+	curr, err := data.NewDatafile(b.path, lastId, false, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
+	if err != nil {
+		return nil
+	}
+
+	b.trie = t
+	b.ttlIndex = ttlIndex
+	b.curr = curr
+	b.datafiles = datafiles
+
+	return nil
+}
+
 func Open(path string, options ...Option) (*Bitcask, error) {
 	var (
 		cfg  *config.Config
@@ -343,7 +515,7 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 	// 加载配置文件
 	configPath := filepath.Join(path, "config.json")
 	if internal.Exists(configPath) {
-		cfg, err := config.Load(path)
+		cfg, err = config.Load(path)
 		if err != nil {
 			return nil, err
 		}
@@ -360,10 +532,12 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 		}
 	}
 
+	// 创建出工作目录
 	if err := os.MkdirAll(path, cfg.DirFileModeBeforeUmask); err != nil {
 		return nil, err
 	}
 
+	// 加载metadata
 	meta, err = loadMetadata(path)
 	if err != nil {
 		return nil, err
@@ -394,8 +568,17 @@ func Open(path string, options ...Option) (*Bitcask, error) {
 	}
 
 	if cfg.AutoRecovery {
-
+		// 检查并恢复损坏的数据
+		if err := data.CheckAndRecover(path, cfg); err != nil {
+			return nil, fmt.Errorf("recovering database: %s", err)
+		}
 	}
+
+	if err := bitcask.Reopen(); err != nil {
+		return nil, err
+	}
+
+	return bitcask, nil
 }
 
 func loadMetadata(path string) (*metadata.MetaData, error) {
@@ -404,4 +587,111 @@ func loadMetadata(path string) (*metadata.MetaData, error) {
 		return meta, nil
 	}
 	return metadata.Load(filepath.Join(path, "meta.json"))
+}
+
+// 加载指定目录中的datafile文件
+func loadDatafiles(path string, maxKeySize uint32, maxValueSize uint64, fileModeBeforeUmask os.FileMode) (datafiles map[int]data.Datafile, lastId int, err error) {
+	fns, err := internal.GetDatafiles(path)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ids, err := internal.ParseIds(fns)
+
+	datafiles = make(map[int]data.Datafile, len(ids))
+
+	for _, id := range ids {
+		datafiles[id], err = data.NewDatafile(path, id, true, maxKeySize, maxValueSize, fileModeBeforeUmask)
+		if err != nil {
+			return
+		}
+	}
+
+	if len(ids) > 0 {
+		lastId = ids[len(ids)-1]
+	}
+	return
+}
+
+// 加载工作目录中的索引文件到内存中
+// 如果没有索引文件则根据datafile重建
+func loadIndexes(b *Bitcask, datafiles map[int]data.Datafile, lastId int) (art.Tree, art.Tree, error) {
+	// 先尝试加载工作目录中的索引文件
+	t, found, err := b.indexer.Load(filepath.Join(b.path, "index"), b.config.MaxKeySize)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 尝试加载工作目录中的ttl_index
+	ttlIndex, _, err := b.ttlIndexer.Load(filepath.Join(b.path, ttlIndexFile), b.config.MaxKeySize)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 如果工作目录中有索引文件，并且在索引文件生成之后没有新数据写入则直接返回
+	if found && b.metadata.IndexUpToDate {
+		return t, ttlIndex, nil
+	}
+
+	if found {
+		// 走到这里说明工作目录中有索引文件但是索引文件不是最新的
+		// 因此需要从最后一个datafile中加载数据到索引中
+		if err := loadIndexFromDatafile(t, ttlIndex, datafiles[lastId]); err != nil {
+			return nil, nil, err
+		}
+
+		return t, ttlIndex, nil
+	}
+
+	// 走到这说明工作目录中没有索引文件
+	// 按序从datafile中加载数据到索引中
+	sortedDatafiles := getSortedDatafiles(datafiles)
+	for _, df := range sortedDatafiles {
+		if err := loadIndexFromDatafile(t, ttlIndex, df); err != nil {
+			return nil, ttlIndex, err
+		}
+	}
+	return t, ttlIndex, nil
+}
+
+// 将datafile中的项加载到索引中
+func loadIndexFromDatafile(t art.Tree, ttlIndex art.Tree, df data.Datafile) error {
+	var offset int64
+	for {
+		e, n, err := df.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+		}
+
+		offset += n
+		if len(e.Value) == 0 {
+			t.Delete(e.Key)
+			continue
+		}
+
+		item := internal.Item{FileId: df.FileId(), Offset: offset, Size: n}
+		t.Insert(e.Key, item)
+		if e.Expiry != nil {
+			ttlIndex.Insert(e.Key, *e.Expiry)
+		}
+	}
+
+	return nil
+}
+
+func getSortedDatafiles(datafiles map[int]data.Datafile) []data.Datafile {
+	out := make([]data.Datafile, len(datafiles))
+	idx := 0
+	for _, df := range datafiles {
+		out[idx] = df
+		idx++
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].FileId() < out[j].FileId()
+	})
+
+	return out
 }
